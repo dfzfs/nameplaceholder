@@ -1,0 +1,32 @@
+/* Name Swap */
+.ns-settings .ns-status { padding: 8px 10px; border-radius: 8px; background: rgba(128, 128, 128, 0.15); line-height: 1.6; margin-bottom: 10px; }
+.ns-settings .ns-field { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
+.ns-settings .ns-field input { width: 100%; box-sizing: border-box; }
+.ns-settings .ns-buttons { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+.ns-settings .menu_button { width: auto; min-width: max-content; white-space: nowrap; flex: 0 0 auto; padding: 6px 14px; }
+.ns-settings h4 { margin: 14px 0 6px 0; }
+.ns-settings .ns-hint { opacity: 0.65; font-size: 0.85em; }
+.ns-name-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; padding: 4px 0; border-bottom: 1px solid rgba(128, 128, 128, 0.25); }
+.ns-name-row .ns-name { flex: 1 1 100%; word-break: break-word; font-weight: bold; }
+.ns-add-row { display: flex; gap: 8px; align-items: center; }
+.ns-add-row input { flex: 1 1 auto; min-width: 0; }
+
+
+/* Heart shortcut beside the chat input */
+#ns_input_button.ns-input-heart {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 34px;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    margin: 0 4px;
+    border-radius: 50%;
+    color: var(--SmartThemeQuoteColor, #e88aa8);
+    flex: 0 0 auto;
+}
+#ns_input_button.ns-input-heart:hover {
+    filter: brightness(1.2);
+    transform: scale(1.06);
+}

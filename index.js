@@ -1,7 +1,8 @@
 /* Name Swap - SillyTavern extension
  * Temporarily replace the {{char}} and {{user}} names for the current chat only.
  * Group chats: each group member can be renamed separately.
- * Names are also temporarily swapped in visible chat/card DOM without changing saved data. */
+ * The replacement happens on the final prompt sent to the AI; chat text on screen
+ * and the character card are never modified. */
 
 const MODULE_NAME = 'name_swap';
 const META_KEY = 'name_swap';
@@ -72,14 +73,25 @@ function buildSwapMap() {
     const o = readOverride();
     const map = new Map();
     const add = (from, to) => {
-        if (from && to && from !== to) map.set(from, to);
+        const source = String(from ?? '').trim();
+        const target = String(to ?? '').trim();
+        if (source && target && source !== target) map.set(source, target);
     };
+
     if (c.groupId) {
         for (const [from, to] of Object.entries(o.members)) add(from, to);
     } else {
-        add(c.name2, o.char);
+        // name2 is the active chat character name in current ST builds.
+        // Fall back to the selected character object for builds where it is absent.
+        const character = Array.isArray(c.characters)
+            ? c.characters[Number(c.characterId)]
+            : null;
+        const originalCharName = c.name2 || character?.name || '';
+        add(originalCharName, o.char);
     }
-    add(c.name1, o.user);
+
+    // name1 is the active user/persona name. Keep it separate from character names.
+    add(c.name1 || c.user_name || '', o.user);
     return map;
 }
 
@@ -98,21 +110,38 @@ function makeSwapper(map) {
     return (text) => String(text).replace(re, (m) => map.get(m) ?? m);
 }
 
+function swapChatMessage(message, swap, map) {
+    if (!message || typeof message !== 'object') return;
+    if (typeof message.content === 'string') {
+        message.content = swap(message.content);
+    } else if (Array.isArray(message.content)) {
+        for (const part of message.content) {
+            if (typeof part?.text === 'string') part.text = swap(part.text);
+        }
+    }
+    // Change the speaker label in the outgoing API payload only.
+    if (typeof message.name === 'string' && map.has(message.name)) {
+        message.name = map.get(message.name);
+    }
+}
+
 function onChatCompletionPromptReady(data) {
     try {
         const map = buildSwapMap();
         const swap = makeSwapper(map);
-        if (!swap || !Array.isArray(data?.chat)) return;
-        for (const m of data.chat) {
-            if (typeof m.content === 'string') {
-                m.content = swap(m.content);
-            } else if (Array.isArray(m.content)) {
-                for (const part of m.content) {
-                    if (typeof part?.text === 'string') part.text = swap(part.text);
-                }
-            }
-            if (typeof m.name === 'string' && map.has(m.name)) m.name = map.get(m.name);
+        if (!swap || !data || typeof data !== 'object') return;
+
+        // SillyTavern's Chat Completion prompt-ready payload normally exposes chat.
+        // Some builds/integrations expose the message array as prompt instead.
+        const messages = Array.isArray(data.chat)
+            ? data.chat
+            : (Array.isArray(data.prompt) ? data.prompt : null);
+        if (!messages) {
+            console.warn(`[${MODULE_NAME}] Chat Completion prompt event had no chat/prompt array`, data);
+            return;
         }
+        for (const message of messages) swapChatMessage(message, swap, map);
+        console.debug(`[${MODULE_NAME}] Applied prompt-only name swap`, Object.fromEntries(map));
     } catch (err) {
         console.error(`[${MODULE_NAME}] chat completion hook error`, err);
     }
@@ -126,111 +155,6 @@ function onCombinePrompts(result) {
     } catch (err) {
         console.error(`[${MODULE_NAME}] text completion hook error`, err);
     }
-}
-
-
-/* ---------------------------------------------------------- visible name swap */
-
-// Keep original DOM text so repeated scans never compound replacements.
-// This is presentation-only: chat metadata, character objects and saved messages are untouched.
-const visibleTextState = new WeakMap();
-const visibleAttrState = new WeakMap();
-let visibleObserver = null;
-
-function applyVisibleNames(root = document.body) {
-    if (!root) return;
-    const swap = makeSwapper(buildSwapMap());
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-        acceptNode(node) {
-            const parent = node.parentElement;
-            if (!parent || parent.closest(`#${MODULE_NAME}_settings, #ns_input_button, script, style, textarea, input, [contenteditable="true"]`)) {
-                return NodeFilter.FILTER_REJECT;
-            }
-            return NodeFilter.FILTER_ACCEPT;
-        },
-    });
-    let node;
-    while ((node = walker.nextNode())) {
-        let state = visibleTextState.get(node);
-        if (!state) {
-            state = { original: node.nodeValue, rendered: null };
-            visibleTextState.set(node, state);
-        } else if (node.nodeValue !== state.rendered) {
-            // The application reused this node for fresh content.
-            state.original = node.nodeValue;
-        }
-        const next = swap ? swap(state.original) : state.original;
-        if (node.nodeValue !== next) node.nodeValue = next;
-        state.rendered = next;
-    }
-
-    // Names in image labels/tooltips are commonly used by character cards and avatars.
-    const attrs = ['title', 'alt', 'aria-label'];
-    const elements = root.querySelectorAll ? [ ...(root.matches?.('*') ? [root] : []), ...root.querySelectorAll('[title], [alt], [aria-label]') ] : [];
-    for (const el of elements) {
-        if (el.closest?.(`#${MODULE_NAME}_settings, #ns_input_button`)) continue;
-        let state = visibleAttrState.get(el);
-        if (!state) {
-            state = {};
-            visibleAttrState.set(el, state);
-        }
-        for (const attr of attrs) {
-            if (!el.hasAttribute(attr)) continue;
-            const current = el.getAttribute(attr);
-            if (!(attr in state)) state[attr] = { original: current, rendered: null };
-            else if (current !== state[attr].rendered) state[attr].original = current;
-            const next = swap ? swap(state[attr].original) : state[attr].original;
-            if (current !== next) el.setAttribute(attr, next);
-            state[attr].rendered = next;
-        }
-    }
-}
-
-function startVisibleNameSwap() {
-    applyVisibleNames();
-    if (visibleObserver) visibleObserver.disconnect();
-    visibleObserver = new MutationObserver((mutations) => {
-        // Avoid rescanning for our own characterData-only edits.
-        if (mutations.some((m) => m.type !== 'characterData' || m.target.nodeValue !== visibleTextState.get(m.target)?.rendered)) {
-            applyVisibleNames();
-        }
-    });
-    visibleObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
-}
-
-function addInputHeartButton() {
-    if (document.getElementById('ns_input_button')) return;
-    const sendForm = document.querySelector('#send_form');
-    if (!sendForm) return;
-    const host = sendForm.querySelector('.extraMesButtons, #leftSendForm, .leftSendForm, .send_form') || sendForm;
-    const button = document.createElement('button');
-    button.id = 'ns_input_button';
-    button.type = 'button';
-    button.className = 'menu_button ns-input-heart';
-    button.title = 'Name Swap 열기';
-    button.setAttribute('aria-label', 'Name Swap 열기');
-    button.innerHTML = '<i class="fa-solid fa-heart" aria-hidden="true"></i>';
-    button.addEventListener('click', () => {
-        const settings = document.getElementById(`${MODULE_NAME}_settings`);
-        if (!settings) return;
-        const toggle = settings.querySelector('.inline-drawer-toggle');
-        // Open the extensions drawer first when it is currently closed.
-        const extensionPanel = document.getElementById('extensions');
-        if (extensionPanel && getComputedStyle(extensionPanel).display === 'none') {
-            document.getElementById('extensions_button')?.click();
-        }
-        setTimeout(() => {
-            toggle?.click();
-            settings.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        }, 80);
-    });
-    host.prepend(button);
-}
-
-function startInputButtonWatcher() {
-    addInputHeartButton();
-    const observer = new MutationObserver(() => addInputHeartButton());
-    observer.observe(document.body, { childList: true, subtree: true });
 }
 
 /* ----------------------------------------------------------------- actions */
@@ -270,7 +194,6 @@ async function applyNames() {
     try {
         await saveOverride(next);
         renderStatus();
-        applyVisibleNames();
         toastr.success('이 채팅의 이름을 적용했어요.');
     } catch (err) {
         console.error(`[${MODULE_NAME}]`, err);
@@ -284,7 +207,6 @@ async function resetNames() {
         await saveOverride({ char: '', user: '', members: {} });
         syncInputs();
         renderStatus();
-        applyVisibleNames();
         toastr.info('원래 이름으로 되돌렸어요.');
     } catch (err) {
         console.error(`[${MODULE_NAME}]`, err);
@@ -421,7 +343,7 @@ function createSettingsUI() {
                     <button id="ns_apply" class="menu_button"><i class="fa-solid fa-check"></i> 적용</button>
                     <button id="ns_reset" class="menu_button"><i class="fa-solid fa-rotate-left"></i> 원래 이름으로</button>
                 </div>
-                <div class="ns-hint">프롬프트와 화면에 보이는 이름을 함께 바꿔요. 원본 대화와 캐릭터 데이터는 수정하지 않아요.</div>
+                <div class="ns-hint">AI에게 보내는 프롬프트에서만 바뀌어요. 화면의 글과 캐릭터 카드는 그대로예요.</div>
 
                 <h4>저장된 이름</h4>
                 <div class="ns-add-row">
@@ -494,13 +416,10 @@ function createSettingsUI() {
 
     eventSource.on(event_types.APP_READY, () => {
         createSettingsUI();
-        startVisibleNameSwap();
-        startInputButtonWatcher();
         eventSource.on(event_types.CHAT_CHANGED, () => {
             syncInputs();
             renderStatus();
             renderSavedNames();
-            applyVisibleNames();
         });
         console.log(`[${MODULE_NAME}] Loaded`);
     });
